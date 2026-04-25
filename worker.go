@@ -133,7 +133,7 @@ func (w *Worker) ProcessJob(ctx context.Context, job *ImportJob) error {
 }
 
 func (w *Worker) importOne(ctx context.Context, userID, jobID string, item mediaItem) error {
-	photo, err := downloadMediaItem(ctx, w.client.httpClient, w.client.authorizer(), userID, item, w.client.downloadCap)
+	photo, err := downloadMediaItem(ctx, w.client.httpClient, w.client.authorizer(), userID, item, w.client.downloadCap, w.client.maxDecodedBytes)
 	if err != nil {
 		return err
 	}

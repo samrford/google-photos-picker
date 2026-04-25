@@ -5,6 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"net/http"
 	"net/url"
@@ -111,10 +114,21 @@ func listSessionMediaItems(ctx context.Context, hc *http.Client, auth authorizer
 }
 
 // downloadMediaItem fetches the original bytes of a picked item, bounded by
-// maxBytes. If the item exceeds maxBytes, ErrDownloadTooBig is returned. The
-// returned DownloadedPhoto owns a *bytes.Reader — callers don't need to Close
-// anything.
-func downloadMediaItem(ctx context.Context, hc *http.Client, auth authorizer, userID string, item mediaItem, maxBytes int64) (DownloadedPhoto, error) {
+// maxBytes (file size on the wire) and maxDecodedBytes (RGBA pixel-buffer
+// memory cost = width × height × 4). The latter check is helpful for proteting
+// against things like sinks that decode/resize images in-memory and might
+// otherwise be OOM'd by a large input image. Pass maxDecodedBytes <= 0 to
+// skip it if you don't do in-memory decode/resize or don't want to limit
+// the size of images.
+//
+// Returns ErrDownloadTooBig if the file exceeds maxBytes, ErrPhotoTooLarge if
+// the decoded dimensions exceed maxDecodedBytes. If the bytes don't have a
+// readable image header (DecodeConfig fails), the dimensions check is skipped
+// and the photo is passed through to the sink for it to handle.
+//
+// The returned DownloadedPhoto owns a *bytes.Reader — callers don't need to
+// Close anything.
+func downloadMediaItem(ctx context.Context, hc *http.Client, auth authorizer, userID string, item mediaItem, maxBytes, maxDecodedBytes int64) (DownloadedPhoto, error) {
 	// =d appended to baseUrl requests the original bytes.
 	resp, err := googleRequest(ctx, hc, auth, userID, http.MethodGet, item.MediaFile.BaseURL+"=d", nil)
 	if err != nil {
@@ -128,6 +142,14 @@ func downloadMediaItem(ctx context.Context, hc *http.Client, auth authorizer, us
 	}
 	if int64(len(body)) > maxBytes {
 		return DownloadedPhoto{}, ErrDownloadTooBig
+	}
+
+	if maxDecodedBytes > 0 {
+		if cfg, _, derr := image.DecodeConfig(bytes.NewReader(body)); derr == nil {
+			if int64(cfg.Width)*int64(cfg.Height)*4 > maxDecodedBytes {
+				return DownloadedPhoto{}, ErrPhotoTooLarge
+			}
+		}
 	}
 
 	return DownloadedPhoto{

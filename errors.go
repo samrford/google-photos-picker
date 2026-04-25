@@ -11,4 +11,5 @@ var (
 	ErrInvalidState   = errors.New("photopicker: invalid or expired OAuth state")
 	ErrNotConnected   = errors.New("photopicker: user has not connected Google")
 	ErrDownloadTooBig = errors.New("photopicker: photo exceeds download cap")
+	ErrPhotoTooLarge  = errors.New("photopicker: photo decoded dimensions exceed cap")
 )
