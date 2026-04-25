@@ -17,6 +17,11 @@ import (
 // is zero.
 const DefaultDownloadCap = 50 << 20
 
+// DefaultMaxDecodedBytes is the per-photo decoded-pixel-buffer ceiling used
+// when Config.MaxDecodedBytes is zero. Only relevant for sinks that decode
+// images in memory.
+const DefaultMaxDecodedBytes = 200 << 20
+
 // revokeURL is the Google token-revocation endpoint. Exposed as a var so tests
 // can point it at an httptest.Server.
 var revokeURL = "https://oauth2.googleapis.com/revoke"
@@ -27,6 +32,11 @@ var revokeURL = "https://oauth2.googleapis.com/revoke"
 //
 // Optional:
 //   - DownloadCap: per-photo byte ceiling (default DefaultDownloadCap).
+//   - MaxDecodedBytes: per-photo decoded-pixel-buffer ceiling, computed as
+//     width × height × 4. This is only relevant for sinks that decode images in memory.
+//     Photos beyond this return ErrPhotoTooLarge before reaching SavePhoto.
+//     Default DefaultMaxDecodedBytes; set explicitly to a negative value to disable
+//     the check.
 //   - HTTPClient: overrides http.DefaultClient for outgoing Google API calls.
 //   - Logger: structured logger; defaults to slog.Default().
 //   - Clock: overridable clock; defaults to time.Now.
@@ -39,23 +49,25 @@ type Config struct {
 	ImportStore ImportStore
 	Sink        PhotoSink
 
-	DownloadCap int64
-	HTTPClient  *http.Client
-	Logger      *slog.Logger
-	Clock       func() time.Time
+	DownloadCap     int64
+	MaxDecodedBytes int64
+	HTTPClient      *http.Client
+	Logger          *slog.Logger
+	Clock           func() time.Time
 }
 
 // Client is the low-level programmatic API. Methods are safe for concurrent
 // use unless noted otherwise.
 type Client struct {
-	oauth       *oauth2.Config
-	tokens      TokenStore
-	imports     ImportStore
-	sink        PhotoSink
-	downloadCap int64
-	httpClient  *http.Client
-	logger      *slog.Logger
-	now         func() time.Time
+	oauth           *oauth2.Config
+	tokens          TokenStore
+	imports         ImportStore
+	sink            PhotoSink
+	downloadCap     int64
+	maxDecodedBytes int64
+	httpClient      *http.Client
+	logger          *slog.Logger
+	now             func() time.Time
 
 	state *stateStore
 }
@@ -76,18 +88,22 @@ func New(cfg Config) (*Client, error) {
 	}
 
 	c := &Client{
-		oauth:       cfg.OAuth,
-		tokens:      cfg.TokenStore,
-		imports:     cfg.ImportStore,
-		sink:        cfg.Sink,
-		downloadCap: cfg.DownloadCap,
-		httpClient:  cfg.HTTPClient,
-		logger:      cfg.Logger,
-		now:         cfg.Clock,
-		state:       newStateStore(),
+		oauth:           cfg.OAuth,
+		tokens:          cfg.TokenStore,
+		imports:         cfg.ImportStore,
+		sink:            cfg.Sink,
+		downloadCap:     cfg.DownloadCap,
+		maxDecodedBytes: cfg.MaxDecodedBytes,
+		httpClient:      cfg.HTTPClient,
+		logger:          cfg.Logger,
+		now:             cfg.Clock,
+		state:           newStateStore(),
 	}
 	if c.downloadCap == 0 {
 		c.downloadCap = DefaultDownloadCap
+	}
+	if c.maxDecodedBytes == 0 {
+		c.maxDecodedBytes = DefaultMaxDecodedBytes
 	}
 	if c.httpClient == nil {
 		c.httpClient = http.DefaultClient

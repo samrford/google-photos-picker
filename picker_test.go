@@ -1,8 +1,11 @@
 package photopicker
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"image"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -135,7 +138,7 @@ func TestDownloadMediaItem_OK(t *testing.T) {
 	defer dl.Close()
 
 	item := mediaItem{ID: "m1", MediaFile: mediaFile{BaseURL: dl.URL + "/photo", MimeType: "image/png", Filename: "x.png"}}
-	got, err := downloadMediaItem(context.Background(), http.DefaultClient, staticAuth("t"), "u", item, 1024)
+	got, err := downloadMediaItem(context.Background(), http.DefaultClient, staticAuth("t"), "u", item, 1024, 0)
 	if err != nil {
 		t.Fatalf("download: %v", err)
 	}
@@ -158,9 +161,45 @@ func TestDownloadMediaItem_RejectsOversized(t *testing.T) {
 	defer dl.Close()
 
 	item := mediaItem{MediaFile: mediaFile{BaseURL: dl.URL + "/p", MimeType: "image/jpeg"}}
-	_, err := downloadMediaItem(context.Background(), http.DefaultClient, staticAuth("t"), "u", item, 100)
+	_, err := downloadMediaItem(context.Background(), http.DefaultClient, staticAuth("t"), "u", item, 100, 0)
 	if !errors.Is(err, ErrDownloadTooBig) {
 		t.Fatalf("want ErrDownloadTooBig, got %v", err)
+	}
+}
+
+func TestDownloadMediaItem_RejectsOversizedDecodedDimensions(t *testing.T) {
+	// Encode a real 100×100 PNG so DecodeConfig succeeds. Decoded RGBA cost is
+	// 100 × 100 × 4 = 40_000 bytes; cap of 1_000 should reject.
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 100, 100))); err != nil {
+		t.Fatalf("encode test png: %v", err)
+	}
+	pngBytes := buf.Bytes()
+
+	dl := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write(pngBytes)
+	}))
+	defer dl.Close()
+
+	item := mediaItem{MediaFile: mediaFile{BaseURL: dl.URL + "/p", MimeType: "image/png"}}
+	_, err := downloadMediaItem(context.Background(), http.DefaultClient, staticAuth("t"), "u", item, 1<<20, 1_000)
+	if !errors.Is(err, ErrPhotoTooLarge) {
+		t.Fatalf("want ErrPhotoTooLarge, got %v", err)
+	}
+}
+
+func TestDownloadMediaItem_PassesThroughUndecodableBytes(t *testing.T) {
+	// "PNGBYTES" isn't a valid image header — DecodeConfig fails — so the cap
+	// check is skipped and the photo flows through to the sink as before.
+	dl := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte("PNGBYTES"))
+	}))
+	defer dl.Close()
+
+	item := mediaItem{MediaFile: mediaFile{BaseURL: dl.URL + "/p", MimeType: "image/png"}}
+	_, err := downloadMediaItem(context.Background(), http.DefaultClient, staticAuth("t"), "u", item, 1<<20, 1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
