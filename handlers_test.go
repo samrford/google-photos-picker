@@ -238,3 +238,66 @@ func TestCallback_SuccessAndErrors(t *testing.T) {
 		t.Fatalf("body: %s", w.Body.String())
 	}
 }
+
+func TestStartImport_DecodesBodyMetadata(t *testing.T) {
+	h, _, is := newTestHandlers(t, "u", nil)
+	extractSID := func(*http.Request) string { return "sess-m" }
+
+	w := httptest.NewRecorder()
+	h.StartImport(extractSID)(w, httptest.NewRequest("POST", "/import",
+		strings.NewReader(`{"metadata":{"item_id":"it-9"}}`)))
+	if w.Code != 200 {
+		t.Fatalf("status %d body=%s", w.Code, w.Body.String())
+	}
+	var sb map[string]string
+	_ = json.Unmarshal(w.Body.Bytes(), &sb)
+
+	is.mu.Lock()
+	defer is.mu.Unlock()
+	j := is.jobs[sb["importJobId"]]
+	if j == nil || j.Metadata["item_id"] != "it-9" {
+		t.Fatalf("metadata not stored: %+v", j)
+	}
+}
+
+func TestStartImport_RejectsBadMetadata(t *testing.T) {
+	h, _, _ := newTestHandlers(t, "u", nil)
+	extractSID := func(*http.Request) string { return "sess-m" }
+
+	w := httptest.NewRecorder()
+	h.StartImport(extractSID)(w, httptest.NewRequest("POST", "/import",
+		strings.NewReader(`{not json`)))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400 for bad metadata, got %d", w.Code)
+	}
+}
+
+func TestStartImport_MetadataCapsConfigurable(t *testing.T) {
+	c, _, _, _ := newTestClient(t)
+	h, err := NewHandlers(HandlersConfig{
+		Client:           c,
+		ResolveUserID:    func(*http.Request) (string, error) { return "u", nil },
+		MaxMetadataBytes: 64,
+		MaxMetadataKeys:  1,
+	})
+	if err != nil {
+		t.Fatalf("NewHandlers: %v", err)
+	}
+	extractSID := func(*http.Request) string { return "sess-c" }
+
+	post := func(body string) int {
+		w := httptest.NewRecorder()
+		h.StartImport(extractSID)(w, httptest.NewRequest("POST", "/import", strings.NewReader(body)))
+		return w.Code
+	}
+
+	if code := post(`{"metadata":{"k":"` + strings.Repeat("x", 100) + `"}}`); code != http.StatusBadRequest {
+		t.Fatalf("over byte cap: want 400, got %d", code)
+	}
+	if code := post(`{"metadata":{"a":"1","b":"2"}}`); code != http.StatusBadRequest {
+		t.Fatalf("over key cap: want 400, got %d", code)
+	}
+	if code := post(`{"metadata":{"k":"v"}}`); code != 200 {
+		t.Fatalf("within caps: want 200, got %d", code)
+	}
+}

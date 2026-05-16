@@ -6,11 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
-	_ "image/jpeg"
-	_ "image/png"
 	"io"
 	"net/http"
 	"net/url"
+
+	// Register the JPEG/PNG decoders so image.DecodeConfig can read their
+	// dimensions for the decoded-size cap (see downloadMediaItem).
+	_ "image/jpeg"
+	_ "image/png"
 )
 
 // photosPickerAPIBase is the Google Photos Picker API root. Exposed as a
@@ -22,11 +25,13 @@ var photosPickerAPIBase = "https://photospicker.googleapis.com/v1"
 type authorizer func(ctx context.Context, userID string) (string, error)
 
 // pickerSession is Google's Picker API session resource, trimmed to the fields
-// the library cares about.
+// the library cares about. ExpireTime is an RFC3339 timestamp after which the
+// session can no longer be used; Google stops accepting picks once it passes.
 type pickerSession struct {
 	ID            string `json:"id"`
 	PickerURI     string `json:"pickerUri"`
 	MediaItemsSet bool   `json:"mediaItemsSet"`
+	ExpireTime    string `json:"expireTime"`
 }
 
 // mediaItem is a single picked item returned by Google's API.
@@ -72,7 +77,7 @@ func googleRequest(ctx context.Context, hc *http.Client, auth authorizer, userID
 	}
 	if resp.StatusCode >= 400 {
 		excerpt, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("%s %s: %d: %s", method, reqURL, resp.StatusCode, excerpt)
 	}
 	return resp, nil
@@ -85,7 +90,7 @@ func googleJSON(ctx context.Context, hc *http.Client, auth authorizer, userID, m
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if out == nil {
 		return nil
 	}
@@ -134,7 +139,7 @@ func downloadMediaItem(ctx context.Context, hc *http.Client, auth authorizer, us
 	if err != nil {
 		return DownloadedPhoto{}, fmt.Errorf("download: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
 	if err != nil {

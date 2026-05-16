@@ -4,7 +4,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+)
+
+// DefaultMaxMetadataBytes / DefaultMaxMetadataKeys bound the optional
+// StartImport metadata so the import row can't be abused as a blob store via
+// the public (untrusted) handler path. Used when HandlersConfig leaves the
+// corresponding field <= 0. Server-derived metadata passed straight to
+// Client.StartImport is trusted and not bound by these.
+const (
+	DefaultMaxMetadataBytes = 4 << 10
+	DefaultMaxMetadataKeys  = 32
 )
 
 // UserIDResolver extracts the authenticated user ID from a request. Consumers
@@ -21,19 +32,27 @@ import (
 type UserIDResolver func(*http.Request) (string, error)
 
 // HandlersConfig is the constructor input for NewHandlers.
+//
+// MaxMetadataBytes / MaxMetadataKeys cap client-supplied StartImport metadata
+// (the untrusted body path only). Each defaults to its Default* constant when
+// left <= 0.
 type HandlersConfig struct {
-	Client        *Client
-	ResolveUserID UserIDResolver
-	Callback      CallbackPage
+	Client           *Client
+	ResolveUserID    UserIDResolver
+	Callback         CallbackPage
+	MaxMetadataBytes int
+	MaxMetadataKeys  int
 }
 
 // Handlers mounts the library's HTTP surface. Each method returns a plain
 // http.HandlerFunc that consumers wire into their existing router with
 // whatever middleware (auth, CORS, method-matching) they like.
 type Handlers struct {
-	client   *Client
-	resolve  UserIDResolver
-	callback CallbackPage
+	client           *Client
+	resolve          UserIDResolver
+	callback         CallbackPage
+	maxMetadataBytes int
+	maxMetadataKeys  int
 }
 
 // NewHandlers builds a *Handlers. Client and ResolveUserID are required.
@@ -44,11 +63,20 @@ func NewHandlers(cfg HandlersConfig) (*Handlers, error) {
 	if cfg.ResolveUserID == nil {
 		return nil, fmt.Errorf("%w: ResolveUserID is required", ErrInvalidConfig)
 	}
-	return &Handlers{
-		client:   cfg.Client,
-		resolve:  cfg.ResolveUserID,
-		callback: cfg.Callback,
-	}, nil
+	h := &Handlers{
+		client:           cfg.Client,
+		resolve:          cfg.ResolveUserID,
+		callback:         cfg.Callback,
+		maxMetadataBytes: cfg.MaxMetadataBytes,
+		maxMetadataKeys:  cfg.MaxMetadataKeys,
+	}
+	if h.maxMetadataBytes <= 0 {
+		h.maxMetadataBytes = DefaultMaxMetadataBytes
+	}
+	if h.maxMetadataKeys <= 0 {
+		h.maxMetadataKeys = DefaultMaxMetadataKeys
+	}
+	return h, nil
 }
 
 // Connect returns an OAuth consent URL as {"consentUrl": "..."}.
@@ -163,15 +191,16 @@ func (h *Handlers) PollSession(extractSessionID func(*http.Request) string) http
 			writeGoogleError(w, h.client, err, "poll session")
 			return
 		}
-		status := "pending"
-		if st.Ready {
-			status = "ready"
-		}
-		writeJSON(w, map[string]string{"status": status})
+		writeJSON(w, map[string]string{"status": string(st.Phase)})
 	}
 }
 
 // StartImport kicks off an async import job and returns {"importJobId": "..."}.
+//
+// An optional JSON body {"metadata": {"k":"v"}} attaches opaque caller context
+// to the job (surfaced to the sink as DownloadedPhoto.JobMetadata). Apps that
+// derive the destination server-side should ignore this path and call
+// Client.StartImport directly with trusted metadata instead.
 func (h *Handlers) StartImport(extractSessionID func(*http.Request) string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID, err := h.resolve(r)
@@ -184,13 +213,48 @@ func (h *Handlers) StartImport(extractSessionID func(*http.Request) string) http
 			http.Error(w, "missing session id", http.StatusBadRequest)
 			return
 		}
-		jobID, err := h.client.StartImport(r.Context(), userID, sid)
+		meta, err := h.decodeStartImportMetadata(r)
+		if err != nil {
+			http.Error(w, `{"error":"invalid metadata"}`, http.StatusBadRequest)
+			return
+		}
+		jobID, err := h.client.StartImport(r.Context(), userID, sid, meta)
 		if err != nil {
 			http.Error(w, "failed to create import job", http.StatusInternalServerError)
 			return
 		}
 		writeJSON(w, map[string]string{"importJobId": jobID})
 	}
+}
+
+// decodeStartImportMetadata reads the optional {"metadata":{...}} body. An
+// absent or empty body yields (nil, nil) — metadata is opt-in. Oversized
+// bodies or too many keys are rejected (per the configured caps) so the
+// import row stays bounded.
+func (h *Handlers) decodeStartImportMetadata(r *http.Request) (map[string]string, error) {
+	if r.Body == nil {
+		return nil, nil
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, int64(h.maxMetadataBytes)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) == 0 {
+		return nil, nil
+	}
+	if len(body) > h.maxMetadataBytes {
+		return nil, fmt.Errorf("metadata exceeds %d bytes", h.maxMetadataBytes)
+	}
+	var envelope struct {
+		Metadata map[string]string `json:"metadata"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil, err
+	}
+	if len(envelope.Metadata) > h.maxMetadataKeys {
+		return nil, fmt.Errorf("metadata exceeds %d keys", h.maxMetadataKeys)
+	}
+	return envelope.Metadata, nil
 }
 
 // GetImport reports job progress.

@@ -118,7 +118,7 @@ func (w *Worker) ProcessJob(ctx context.Context, job *ImportJob) error {
 	}
 
 	for _, item := range items {
-		if err := w.importOne(jobCtx, job.UserID, job.ID, item); err != nil {
+		if err := w.importOne(jobCtx, job.UserID, job.ID, item, job.Metadata); err != nil {
 			w.logger.Warn("photopicker: import item", "job", job.ID, "item", item.ID, "err", err)
 			_ = w.client.imports.RecordItemFailure(jobCtx, job.ID)
 		}
@@ -132,11 +132,12 @@ func (w *Worker) ProcessJob(ctx context.Context, job *ImportJob) error {
 	return nil
 }
 
-func (w *Worker) importOne(ctx context.Context, userID, jobID string, item mediaItem) error {
+func (w *Worker) importOne(ctx context.Context, userID, jobID string, item mediaItem, meta map[string]string) error {
 	photo, err := downloadMediaItem(ctx, w.client.httpClient, w.client.authorizer(), userID, item, w.client.downloadCap, w.client.maxDecodedBytes)
 	if err != nil {
 		return err
 	}
+	photo.JobMetadata = meta
 	savedID, err := w.client.sink.SavePhoto(ctx, userID, jobID, photo)
 	if err != nil {
 		return fmt.Errorf("sink: %w", err)
