@@ -23,6 +23,9 @@ const DEFAULT_SESSION_POLL_MS = 2000;
 const DEFAULT_JOB_POLL_MS = 1500;
 const MAX_POLL_FAILURES = 4;
 const MAX_POLL_BACKOFF_MS = 15000;
+// Backstop for waitForOAuth so an abandoned consent times out
+// out rather than hanging forever.
+const OAUTH_TIMEOUT_MS = 5 * 60 * 1000;
 
 const INITIAL: FlowState = {
   phase: 'idle',
@@ -145,7 +148,7 @@ export class GooglePhotosFlow {
       this.ensureCurrent(myRun);
       if (win.closed) throw new Error('Authorisation window was closed.');
       win.location.href = consentUrl;
-      await this.waitForOAuth(win, myRun);
+      await this.waitForOAuth(myRun);
       this.closePopup();
       this.setState({ phase: 'idle', connected: true });
     } catch (e) {
@@ -262,9 +265,6 @@ export class GooglePhotosFlow {
   private async pollSession(sessionId: string, myRun: number): Promise<void> {
     const interval = this.config.pollIntervalMs?.session ?? DEFAULT_SESSION_POLL_MS;
     for (;;) {
-      if (this.popup?.closed) {
-        throw new Error('Picker window was closed before a selection was confirmed.');
-      }
       const s = await this.pollFetch<SessionStatus>(
         this.config.endpoints.pollSession(sessionId),
         myRun,
@@ -308,16 +308,15 @@ export class GooglePhotosFlow {
     }
   }
 
-  // Resolves once the Go callback page (loaded in `popup` after Google's
-  // redirect) posts `{ type, status, message }` back via window.opener. Settles
-  // exactly once — via the matching postMessage (success → resolve, error →
-  // reject with its message), the user manually closing the popup (no event
-  // fires for that, hence the polling watchdog), or the run being superseded
-  // (→ FlowCancelled). `finish()` tears down the listener + watchdog on
-  // whichever happens first. Non-matching messages (wrong type, or wrong
-  // origin when `expectedOrigin` is set) are ignored, not rejected — other
+  // Resolves once the Go callback page (loaded in the popup after Google's
+  // redirect) posts `{ type, status, message }` back via window.opener.
+  // Settles exactly once — the matching postMessage (success → resolve, error
+  // → reject with its message), the run being superseded (→ FlowCancelled), or
+  // an overall timeout. The timeout is the backstop for if the
+  // user abandons consent. Non-matching messages (wrong type, or wrong origin
+  // when `expectedOrigin` is set) are ignored, not rejected — other
   // postMessages on the page must pass through untouched.
-  private waitForOAuth(popup: Window, myRun: number): Promise<void> {
+  private waitForOAuth(myRun: number): Promise<void> {
     const target = this.config.messageTarget ?? globalThis;
     const expectedOrigin = this.config.expectedOrigin;
     const type = this.config.postMessageType;
@@ -326,7 +325,8 @@ export class GooglePhotosFlow {
       const finish = () => {
         if (settled) return;
         settled = true;
-        clearInterval(watchdog);
+        clearInterval(poll);
+        clearTimeout(timeout);
         target.removeEventListener('message', onMessage as EventListener);
       };
       const onMessage = (e: MessageEvent) => {
@@ -342,16 +342,16 @@ export class GooglePhotosFlow {
         if (d.status === 'success') resolve();
         else reject(new Error(typeof d.message === 'string' && d.message ? d.message : 'Google authorisation failed.'));
       };
-      // Detect the user manually closing the consent window.
-      const watchdog = setInterval(() => {
+      const poll = setInterval(() => {
         if (this.runId !== myRun) {
           finish();
           reject(new FlowCancelled());
-        } else if (popup.closed) {
-          finish();
-          reject(new Error('Authorisation window was closed.'));
         }
       }, 500);
+      const timeout = setTimeout(() => {
+        finish();
+        reject(new Error('Google authorisation timed out — please try again.'));
+      }, OAUTH_TIMEOUT_MS);
       target.addEventListener('message', onMessage as EventListener);
     });
   }
