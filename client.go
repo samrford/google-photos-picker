@@ -133,6 +133,7 @@ type PickerSession struct {
 // user finished (so the frontend should restart rather than poll forever).
 type SessionPhase string
 
+// Picker session phases reported by PollPickerSession.
 const (
 	SessionPending SessionPhase = "pending"
 	SessionReady   SessionPhase = "ready"
@@ -222,7 +223,7 @@ func (c *Client) revokeAtGoogle(token string) {
 		c.logger.Warn("photopicker: revoke request failed", "err", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		c.logger.Warn("photopicker: revoke returned non-2xx", "status", resp.StatusCode)
 	}

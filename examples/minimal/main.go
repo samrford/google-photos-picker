@@ -66,7 +66,7 @@ func (s *localSink) SavePhoto(_ context.Context, userID, jobID string, p photopi
 	if err != nil {
 		return "", fmt.Errorf("create file: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	if _, err := io.Copy(f, p.Bytes); err != nil {
 		return "", fmt.Errorf("write file: %w", err)
@@ -109,7 +109,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("open db: %v", err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if err := db.Ping(); err != nil {
 		log.Fatalf("ping db: %v", err)
@@ -203,7 +203,7 @@ func main() {
 	// Health check
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintln(w, "ok")
+		_, _ = fmt.Fprintln(w, "ok")
 	})
 
 	// ── Worker ─────────────────────────────────────────────────────────

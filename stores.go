@@ -38,6 +38,7 @@ type TokenStore interface {
 // ImportStatus is the lifecycle of an import job.
 type ImportStatus string
 
+// Import job lifecycle states.
 const (
 	ImportStatusPending  ImportStatus = "pending"
 	ImportStatusRunning  ImportStatus = "running"
