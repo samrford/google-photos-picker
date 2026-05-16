@@ -10,6 +10,11 @@ import photopicker "github.com/samrford/google-photos-picker"
 
 Status: **pre-release (v0.x).** APIs may shift before v1.0.
 
+> **Browser client included.** The matching framework-agnostic JS/TS client —
+> popup-safe OAuth, the polling state machine, exactly-once completion, plus
+> React and Svelte adapters — lives in [`client/`](client/), published as
+> `google-photos-picker-client`.
+
 ---
 
 ## Quick start
@@ -85,7 +90,33 @@ func (sk *mySink) SavePhoto(ctx context.Context, userID, jobID string, p photopi
 }
 ```
 
-`savedID` (the return value) is free-form — it's surfaced back to callers in `ImportJob.ImageURLs`.
+`savedID` (the return value) is free-form — it's surfaced back to callers in
+`ImportJob.SavedIDs` (JSON: `savedIds`).
+
+### Import metadata
+
+Attach opaque caller context to an import and get it back in the sink — so you
+never need a side table mapping job IDs to "where these photos belong":
+
+```go
+p.JobMetadata // map[string]string set on every DownloadedPhoto in the job
+```
+
+Two ways to supply it:
+
+- **Server-derived (recommended when the destination is sensitive):** ignore
+  the handler's body and call `Client.StartImport(ctx, userID, sid, meta)`
+  directly from a thin wrapper that has already authorised the destination.
+  The browser never sees or controls the metadata.
+- **Client-supplied:** `POST …/sessions/{id}/import` with body
+  `{"metadata":{"k":"v"}}`. Convenient, but the library forwards it verbatim
+  and **does not trust or validate it** — that's on you.
+
+The client-supplied path is capped so the import row can't be abused as a blob
+store — `HandlersConfig.MaxMetadataBytes` / `MaxMetadataKeys`, defaulting to
+`DefaultMaxMetadataBytes` (4 KiB) / `DefaultMaxMetadataKeys` (32) when left
+unset. The server-derived path is trusted and uncapped. Metadata never appears
+in any API response.
 
 See [`examples/minimal/main.go`](examples/minimal/main.go) for a complete runnable server with a local-disk sink.
 
@@ -103,6 +134,11 @@ See [`examples/minimal/main.go`](examples/minimal/main.go) for a complete runnab
 | GET | `/sessions/{id}` | `h.PollSession(extract)` | yes |
 | POST | `/sessions/{id}/import` | `h.StartImport(extract)` | yes |
 | GET | `/imports/{id}` | `h.GetImport(extract)` | yes |
+
+`PollSession` returns `{"status": "pending" | "ready" | "expired"}` — `expired`
+means the picker session lapsed before the user confirmed a selection, so the
+frontend should restart rather than poll forever. `StartImport` accepts an
+optional `{"metadata":{…}}` body (see [Import metadata](#import-metadata)).
 
 All authenticated handlers return **401** if `ResolveUserID` errors, **428** with
 `{"error":"google_not_connected"}` if the user hasn't linked Google, and **502** on
