@@ -18,6 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
     services:
       postgres:
         image: postgres:16-alpine
@@ -52,7 +53,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Validate client
@@ -79,21 +80,19 @@ jobs:
           echo "semver=${MAJOR}.${MINOR}.${PATCH}" >> $GITHUB_OUTPUT
           echo "$LATEST → $NEW"
 
-      # Requires an NPM_TOKEN repo secret (an npm
-      # automation token with publish rights). dist/ was produced by "Validate
-      # client"; the package version is pinned to the release tag so the npm
-      # client and Go lib stay in lockstep. --no-git-tag-version: don't let npm
-      # create its own commit/tag.
+      # Published via npm Trusted Publishing (OIDC). The version set here
+      # is pinned to the release tag so the npm client and Go lib stay in
+      # lockstep; --no-git-tag-version keeps npm from making its own commit/tag.
       - name: Publish client to npm
         working-directory: client
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          npm install -g npm@latest   # ensure npm >= 11.5
           npm version "${{ steps.version.outputs.semver }}" --no-git-tag-version --allow-same-version
           npm publish --access public
 
-      # Tag the commit and cut the GitHub release,
-      # which is also what publishes the Go module at this version.
+      # Only after npm is live: tag the commit + cut the GitHub release, which
+      # is also what publishes the Go module at this version. (npm-before-tag
+      # so a publish failure leaves no orphan tag.)
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

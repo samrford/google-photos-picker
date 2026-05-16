@@ -17,7 +17,7 @@
   "bugs": "https://github.com/samrford/google-photos-picker/issues",
   "repository": {
     "type": "git",
-    "url": "https://github.com/samrford/google-photos-picker",
+    "url": "git+https://github.com/samrford/google-photos-picker.git",
     "directory": "client"
   },
   "type": "module",
