@@ -21,6 +21,8 @@ export class FlowCancelled extends Error {
 
 const DEFAULT_SESSION_POLL_MS = 2000;
 const DEFAULT_JOB_POLL_MS = 1500;
+const MAX_POLL_FAILURES = 4;
+const MAX_POLL_BACKOFF_MS = 15000;
 
 const INITIAL: FlowState = {
   phase: 'idle',
@@ -108,16 +110,21 @@ export class GooglePhotosFlow {
   async refreshStatus(): Promise<void> {
     try {
       const s = await this.config.fetchJson<GoogleStatus>(this.config.endpoints.status);
-      this.setState({ connected: !!s.connected });
-    } catch (e) {
-      this.setState({ connected: false, error: messageOf(e) });
+      this.setState({ connected: !!s.connected, error: null });
+    } catch {
+      this.setState({ connected: false });
     }
   }
 
   /** Revoke the Google connection. */
   async disconnect(): Promise<void> {
-    await this.config.fetchJson<void>(this.config.endpoints.disconnect, { method: 'DELETE' });
-    this.setState({ connected: false });
+    try {
+      await this.config.fetchJson<void>(this.config.endpoints.disconnect, { method: 'DELETE' });
+      this.setState({ connected: false, error: null });
+    } catch (e) {
+      this.setState({ error: messageOf(e) });
+      throw e;
+    }
   }
 
   /**
@@ -236,11 +243,32 @@ export class GooglePhotosFlow {
     });
   }
 
+  // Polling fetch with retry + exponential backoff.
+  // FlowCancelled and cancellation always propagate at once.
+  private async pollFetch<T>(url: string, myRun: number, baseMs: number): Promise<T> {
+    let failures = 0;
+    for (;;) {
+      try {
+        return await this.config.fetchJson<T>(url);
+      } catch (e) {
+        if (e instanceof FlowCancelled) throw e;
+        this.ensureCurrent(myRun);
+        if (++failures > MAX_POLL_FAILURES) throw e;
+        await this.cancellableDelay(Math.min(baseMs * 2 ** (failures - 1), MAX_POLL_BACKOFF_MS), myRun);
+      }
+    }
+  }
+
   private async pollSession(sessionId: string, myRun: number): Promise<void> {
     const interval = this.config.pollIntervalMs?.session ?? DEFAULT_SESSION_POLL_MS;
     for (;;) {
-      const s = await this.config.fetchJson<SessionStatus>(
+      if (this.popup?.closed) {
+        throw new Error('Picker window was closed before a selection was confirmed.');
+      }
+      const s = await this.pollFetch<SessionStatus>(
         this.config.endpoints.pollSession(sessionId),
+        myRun,
+        interval,
       );
       this.ensureCurrent(myRun);
       if (s.status === 'ready') return;
@@ -256,7 +284,11 @@ export class GooglePhotosFlow {
   private async pollJob(jobId: string, myRun: number): Promise<CompleteResult> {
     const interval = this.config.pollIntervalMs?.job ?? DEFAULT_JOB_POLL_MS;
     for (;;) {
-      const job = await this.config.fetchJson<ImportJob>(this.config.endpoints.getImport(jobId));
+      const job = await this.pollFetch<ImportJob>(
+        this.config.endpoints.getImport(jobId),
+        myRun,
+        interval,
+      );
       this.ensureCurrent(myRun);
       this.setState({
         progress: { total: job.total, completed: job.completed, failed: job.failed },

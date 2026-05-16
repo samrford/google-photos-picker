@@ -4,6 +4,17 @@
   "description": "Framework-agnostic client for the google-photos-picker import flow (state machine, popup-safe OAuth, polling) with optional React and Svelte adapters.",
   "license": "MIT",
   "author": "Sam Ford",
+  "keywords": [
+    "google-photos",
+    "google-photos-picker",
+    "oauth",
+    "picker",
+    "import",
+    "react",
+    "svelte"
+  ],
+  "homepage": "https://github.com/samrford/google-photos-picker/tree/master/client",
+  "bugs": "https://github.com/samrford/google-photos-picker/issues",
   "repository": {
     "type": "git",
     "url": "https://github.com/samrford/google-photos-picker",
@@ -31,10 +42,14 @@
       "require": "./dist/svelte.cjs"
     }
   },
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepublishOnly": "npm run build && npm run test"
   },
   "peerDependencies": {
     "react": ">=18"

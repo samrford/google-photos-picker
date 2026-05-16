@@ -169,3 +169,75 @@ describe('start()', () => {
     expect(flow.state.phase).toBe('idle');
   });
 });
+
+describe('poll resilience', () => {
+  it('tolerates a transient import-poll failure, then completes', async () => {
+    let jobPolls = 0;
+    const { flow } = setup(async (url, init) => {
+      if (url === '/sessions' && init?.method === 'POST') return { sessionId: 's', pickerUri: 'p' } as never;
+      if (url === '/sessions/s') return { status: 'ready' } as never;
+      if (url === '/sessions/s/import') return { importJobId: 'j' } as never;
+      if (url === '/imports/j') {
+        jobPolls++;
+        if (jobPolls === 1) throw new Error('transient 500');
+        return { id: 'j', status: 'complete', total: 1, completed: 1, failed: 0, savedIds: ['x'] } as never;
+      }
+      throw new Error('unmapped ' + url);
+    });
+    const r = await flow.start();
+    expect(r.savedIds).toEqual(['x']);
+    expect(flow.state.phase).toBe('done');
+    expect(jobPolls).toBe(2); // failed once, retried, succeeded
+  });
+
+  it('gives up after the consecutive-failure budget is exhausted', async () => {
+    let jobPolls = 0;
+    const { flow } = setup(async (url, init) => {
+      if (url === '/sessions' && init?.method === 'POST') return { sessionId: 's', pickerUri: 'p' } as never;
+      if (url === '/sessions/s') return { status: 'ready' } as never;
+      if (url === '/sessions/s/import') return { importJobId: 'j' } as never;
+      if (url === '/imports/j') {
+        jobPolls++;
+        throw new Error('boom');
+      }
+      throw new Error('unmapped ' + url);
+    });
+    await expect(flow.start()).rejects.toThrow('boom');
+    expect(flow.state.phase).toBe('error');
+    expect(jobPolls).toBe(5); // initial attempt + MAX_POLL_FAILURES (4) retries
+  });
+
+  it('aborts picking when the user closes the popup', async () => {
+    let polls = 0;
+    const { flow, win } = setup(async (url, init) => {
+      if (url === '/sessions' && init?.method === 'POST') return { sessionId: 's', pickerUri: 'p' } as never;
+      if (url === '/sessions/s') {
+        polls++;
+        return { status: 'pending' } as never;
+      }
+      throw new Error('unmapped ' + url);
+    });
+    const p = flow.start();
+    await vi.waitFor(() => expect(polls).toBeGreaterThan(0));
+    win.close(); // user dismisses the picker window mid-poll
+    await expect(p).rejects.toThrow(/closed/i);
+    expect(flow.state.phase).toBe('error');
+  });
+});
+
+describe('refreshStatus()', () => {
+  it('clears a prior error once status resolves', async () => {
+    const { flow } = setup(
+      async (url) => {
+        if (url === '/status') return { connected: true, scopes: null } as never;
+        throw new Error('unmapped ' + url);
+      },
+      { openWindow: () => null },
+    );
+    await expect(flow.connect()).rejects.toThrow(/popup blocked/i);
+    expect(flow.state.error).toBeTruthy();
+    await flow.refreshStatus();
+    expect(flow.state.connected).toBe(true);
+    expect(flow.state.error).toBeNull();
+  });
+});

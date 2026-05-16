@@ -18,6 +18,21 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: photopicker_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://postgres:test@localhost:5432/photopicker_test?sslmode=disable
     steps:
       - uses: actions/checkout@v4
         with:
@@ -33,6 +48,21 @@ jobs:
           go vet ./...
           go test ./...
 
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Validate client
+        working-directory: client
+        run: |
+          bun install --frozen-lockfile
+          bun run typecheck
+          bun run test
+          bun run build
+
       - name: Compute version
         id: version
         run: |
@@ -46,8 +76,24 @@ jobs:
           esac
           NEW="v${MAJOR}.${MINOR}.${PATCH}"
           echo "tag=$NEW" >> $GITHUB_OUTPUT
+          echo "semver=${MAJOR}.${MINOR}.${PATCH}" >> $GITHUB_OUTPUT
           echo "$LATEST → $NEW"
 
+      # Requires an NPM_TOKEN repo secret (an npm
+      # automation token with publish rights). dist/ was produced by "Validate
+      # client"; the package version is pinned to the release tag so the npm
+      # client and Go lib stay in lockstep. --no-git-tag-version: don't let npm
+      # create its own commit/tag.
+      - name: Publish client to npm
+        working-directory: client
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          npm version "${{ steps.version.outputs.semver }}" --no-git-tag-version --allow-same-version
+          npm publish --access public
+
+      # Tag the commit and cut the GitHub release,
+      # which is also what publishes the Go module at this version.
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
