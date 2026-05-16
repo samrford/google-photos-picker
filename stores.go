@@ -46,28 +46,36 @@ const (
 )
 
 // ImportJob is the public shape of an import, suitable for JSON encoding in
-// HTTP responses. The `-` tag on UserID/SessionID keeps them out of public
-// payloads.
+// HTTP responses. The `-` tag on UserID/SessionID/Metadata keeps them out of
+// public payloads.
+//
+// SavedIDs collects the free-form IDs each PhotoSink.SavePhoto returns (a URL,
+// a storage key, a row UUID — whatever the consumer chose). Metadata is the
+// opaque caller context attached at StartImport and threaded back to the sink
+// via DownloadedPhoto.JobMetadata; it never appears in API responses.
 type ImportJob struct {
-	ID             string       `json:"id"`
-	UserID         string       `json:"-"`
-	SessionID      string       `json:"-"`
-	Status         ImportStatus `json:"status"`
-	TotalItems     int          `json:"total"`
-	CompletedItems int          `json:"completed"`
-	FailedItems    int          `json:"failed"`
-	ImageURLs      []string     `json:"imageUrls"`
-	Error          string       `json:"error,omitempty"`
+	ID             string            `json:"id"`
+	UserID         string            `json:"-"`
+	SessionID      string            `json:"-"`
+	Status         ImportStatus      `json:"status"`
+	TotalItems     int               `json:"total"`
+	CompletedItems int               `json:"completed"`
+	FailedItems    int               `json:"failed"`
+	SavedIDs       []string          `json:"savedIds"`
+	Metadata       map[string]string `json:"-"`
+	Error          string            `json:"error,omitempty"`
 }
 
 // ImportStore persists import jobs and their lifecycle.
 //
-// ClaimNextPending must atomically mark the oldest pending job as running and
-// return it; (nil, nil) means no work is available. Get returns a terminal
-// job once and is expected to delete it afterwards — terminal jobs only need
-// to survive long enough for one final poll.
+// CreateJob persists the opaque caller metadata alongside the job; meta may be
+// nil. ClaimNextPending must atomically mark the oldest pending job as running
+// and return it (with Metadata populated); (nil, nil) means no work is
+// available. Get returns a terminal job once and is expected to delete it
+// afterwards — terminal jobs only need to survive long enough for one final
+// poll.
 type ImportStore interface {
-	CreateJob(ctx context.Context, userID, sessionID string) (jobID string, err error)
+	CreateJob(ctx context.Context, userID, sessionID string, meta map[string]string) (jobID string, err error)
 	ClaimNextPending(ctx context.Context) (*ImportJob, error)
 	SetTotal(ctx context.Context, jobID string, total int) error
 	RecordItemSuccess(ctx context.Context, jobID, savedID string) error

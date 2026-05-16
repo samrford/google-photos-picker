@@ -22,13 +22,23 @@ func NewImportStore(db *sql.DB) *PgImportStore {
 	return &PgImportStore{db: db}
 }
 
-// CreateJob registers a new pending import job and returns its ID.
-func (s *PgImportStore) CreateJob(ctx context.Context, userID, sessionID string) (string, error) {
+// CreateJob registers a new pending import job and returns its ID. meta is
+// persisted as-is (nil becomes an empty object) and threaded back to the sink
+// when the worker processes the job.
+func (s *PgImportStore) CreateJob(ctx context.Context, userID, sessionID string, meta map[string]string) (string, error) {
 	id := uuid.New().String()
+	metaJSON := []byte("{}")
+	if meta != nil {
+		b, err := json.Marshal(meta)
+		if err != nil {
+			return "", err
+		}
+		metaJSON = b
+	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO photopicker_imports (id, user_id, session_id, status, image_urls)
-		VALUES ($1, $2, $3, 'pending', '[]')
-	`, id, userID, sessionID)
+		INSERT INTO photopicker_imports (id, user_id, session_id, status, saved_ids, metadata)
+		VALUES ($1, $2, $3, 'pending', '[]', $4)
+	`, id, userID, sessionID, metaJSON)
 	if err != nil {
 		return "", err
 	}
@@ -48,17 +58,23 @@ func (s *PgImportStore) ClaimNextPending(ctx context.Context) (*photopicker.Impo
 			FOR UPDATE SKIP LOCKED
 			LIMIT 1
 		)
-		RETURNING id, user_id, session_id, status, total_items, completed_items, failed_items
+		RETURNING id, user_id, session_id, status, total_items, completed_items, failed_items, metadata
 	`)
-	var j photopicker.ImportJob
-	err := row.Scan(&j.ID, &j.UserID, &j.SessionID, &j.Status, &j.TotalItems, &j.CompletedItems, &j.FailedItems)
+	var (
+		j       photopicker.ImportJob
+		metaRaw []byte
+	)
+	err := row.Scan(&j.ID, &j.UserID, &j.SessionID, &j.Status, &j.TotalItems, &j.CompletedItems, &j.FailedItems, &metaRaw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	j.ImageURLs = []string{}
+	if len(metaRaw) > 0 {
+		_ = json.Unmarshal(metaRaw, &j.Metadata)
+	}
+	j.SavedIDs = []string{}
 	return &j, nil
 }
 
@@ -76,7 +92,7 @@ func (s *PgImportStore) RecordItemSuccess(ctx context.Context, jobID, savedID st
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE photopicker_imports
 		SET completed_items = completed_items + 1,
-		    image_urls      = image_urls || to_jsonb($2::text),
+		    saved_ids       = saved_ids || to_jsonb($2::text),
 		    updated_at      = NOW()
 		WHERE id = $1
 	`, jobID, savedID)
@@ -115,26 +131,30 @@ func (s *PgImportStore) MarkFailed(ctx context.Context, jobID, errMsg string) er
 // being read — they only need to survive long enough for one final poll.
 func (s *PgImportStore) Get(ctx context.Context, userID, jobID string) (*photopicker.ImportJob, error) {
 	var (
-		j            photopicker.ImportJob
-		imageURLsRaw []byte
-		errStr       sql.NullString
+		j           photopicker.ImportJob
+		savedIDsRaw []byte
+		metaRaw     []byte
+		errStr      sql.NullString
 	)
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, user_id, session_id, status, total_items, completed_items, failed_items, image_urls, error
+		SELECT id, user_id, session_id, status, total_items, completed_items, failed_items, saved_ids, error, metadata
 		FROM photopicker_imports WHERE id = $1 AND user_id = $2
 	`, jobID, userID).Scan(&j.ID, &j.UserID, &j.SessionID, &j.Status,
-		&j.TotalItems, &j.CompletedItems, &j.FailedItems, &imageURLsRaw, &errStr)
+		&j.TotalItems, &j.CompletedItems, &j.FailedItems, &savedIDsRaw, &errStr, &metaRaw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, photopicker.ErrJobNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
-	if len(imageURLsRaw) > 0 {
-		_ = json.Unmarshal(imageURLsRaw, &j.ImageURLs)
+	if len(savedIDsRaw) > 0 {
+		_ = json.Unmarshal(savedIDsRaw, &j.SavedIDs)
 	}
-	if j.ImageURLs == nil {
-		j.ImageURLs = []string{}
+	if j.SavedIDs == nil {
+		j.SavedIDs = []string{}
+	}
+	if len(metaRaw) > 0 {
+		_ = json.Unmarshal(metaRaw, &j.Metadata)
 	}
 	if errStr.Valid {
 		j.Error = errStr.String

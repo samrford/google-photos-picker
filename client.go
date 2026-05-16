@@ -128,9 +128,20 @@ type PickerSession struct {
 	PickerURI string
 }
 
+// SessionPhase is the lifecycle state of a picker session as the frontend
+// sees it: still choosing, done choosing, or the session expired before the
+// user finished (so the frontend should restart rather than poll forever).
+type SessionPhase string
+
+const (
+	SessionPending SessionPhase = "pending"
+	SessionReady   SessionPhase = "ready"
+	SessionExpired SessionPhase = "expired"
+)
+
 // PickerSessionStatus is the result of PollPickerSession.
 type PickerSessionStatus struct {
-	Ready bool
+	Phase SessionPhase
 }
 
 // ─── OAuth ──────────────────────────────────────────────────────────────────
@@ -262,22 +273,45 @@ func (c *Client) CreatePickerSession(ctx context.Context, userID string) (Picker
 	return PickerSession{SessionID: sess.ID, PickerURI: sess.PickerURI}, nil
 }
 
-// PollPickerSession reports whether the user has finished picking.
+// PollPickerSession reports where the session is in its lifecycle: ready once
+// the user has confirmed a selection, expired if the session's deadline has
+// passed without one, otherwise pending.
 func (c *Client) PollPickerSession(ctx context.Context, userID, sessionID string) (PickerSessionStatus, error) {
 	var sess pickerSession
 	err := googleJSON(ctx, c.httpClient, c.authorizer(), userID, http.MethodGet, photosPickerAPIBase+"/sessions/"+sessionID, nil, &sess)
 	if err != nil {
 		return PickerSessionStatus{}, mapNotConnected(err)
 	}
-	return PickerSessionStatus{Ready: sess.MediaItemsSet}, nil
+	return PickerSessionStatus{Phase: c.sessionPhase(sess)}, nil
+}
+
+// sessionPhase derives the lifecycle phase. A confirmed selection wins even if
+// the session is also past its deadline (the picks are still retrievable). An
+// absent or unparseable expireTime is treated as "not expired" — the worker's
+// own timeout is the backstop, so a parse failure must not strand the user.
+func (c *Client) sessionPhase(s pickerSession) SessionPhase {
+	if s.MediaItemsSet {
+		return SessionReady
+	}
+	if s.ExpireTime != "" {
+		if exp, err := time.Parse(time.RFC3339, s.ExpireTime); err == nil && !c.now().Before(exp) {
+			return SessionExpired
+		}
+	}
+	return SessionPending
 }
 
 // ─── Imports ───────────────────────────────────────────────────────────────
 
 // StartImport creates a pending import job for a session. The background
 // Worker (see NewWorker) picks it up and drives it to completion.
-func (c *Client) StartImport(ctx context.Context, userID, sessionID string) (string, error) {
-	return c.imports.CreateJob(ctx, userID, sessionID)
+//
+// meta is opaque caller context (e.g. the destination item) stored with the
+// job and surfaced to the sink as DownloadedPhoto.JobMetadata. It may be nil.
+// The library never inspects or trusts it; consumers that derive it from
+// untrusted input must validate before calling.
+func (c *Client) StartImport(ctx context.Context, userID, sessionID string, meta map[string]string) (string, error) {
+	return c.imports.CreateJob(ctx, userID, sessionID, meta)
 }
 
 // GetImport returns a job scoped to its owning user. Implementations of

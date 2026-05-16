@@ -1,8 +1,8 @@
 package postgres
 
-// SchemaUpSQL is the forward DDL from the v0.1 schema migration, minus Goose's
-// `-- +goose Up/Down` comment markers. Useful for consumers using a different
-// migration tool (Flyway, Alembic, hand-rolled).
+// SchemaUpSQL is the cumulative forward DDL (all migrations folded into the
+// final shape), minus Goose's `-- +goose Up/Down` comment markers. Useful for
+// consumers using a different migration tool (Flyway, Alembic, hand-rolled).
 const SchemaUpSQL = `
 CREATE TABLE photopicker_oauth_tokens (
     user_id       VARCHAR(255) PRIMARY KEY,
@@ -22,7 +22,8 @@ CREATE TABLE photopicker_imports (
     total_items     INT NOT NULL DEFAULT 0,
     completed_items INT NOT NULL DEFAULT 0,
     failed_items    INT NOT NULL DEFAULT 0,
-    image_urls      JSONB NOT NULL DEFAULT '[]',
+    saved_ids       JSONB NOT NULL DEFAULT '[]',
+    metadata        JSONB NOT NULL DEFAULT '{}',
     error           TEXT,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
