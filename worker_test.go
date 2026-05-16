@@ -45,7 +45,7 @@ func TestWorker_DrainOnce_ProcessesPendingJobs(t *testing.T) {
 
 	c, ts, is, sk := newTestClient(t)
 	ts.records["u"] = TokenRecord{UserID: "u", AccessToken: "a", ExpiresAt: time.Now().Add(time.Hour)}
-	jobID, _ := is.CreateJob(context.Background(), "u", "sess-1")
+	jobID, _ := is.CreateJob(context.Background(), "u", "sess-1", nil)
 
 	w, err := NewWorker(WorkerConfig{Client: c})
 	if err != nil {
@@ -65,8 +65,8 @@ func TestWorker_DrainOnce_ProcessesPendingJobs(t *testing.T) {
 	if job.CompletedItems != 2 {
 		t.Fatalf("completed = %d", job.CompletedItems)
 	}
-	if len(job.ImageURLs) != 2 {
-		t.Fatalf("image urls = %v", job.ImageURLs)
+	if len(job.SavedIDs) != 2 {
+		t.Fatalf("saved ids = %v", job.SavedIDs)
 	}
 	if len(sk.saved) != 2 {
 		t.Fatalf("sink saved %d", len(sk.saved))
@@ -87,7 +87,7 @@ func TestWorker_ProcessJob_FailureMarksFailed(t *testing.T) {
 
 	c, ts, is, _ := newTestClient(t)
 	ts.records["u"] = TokenRecord{UserID: "u", AccessToken: "a", ExpiresAt: time.Now().Add(time.Hour)}
-	jobID, _ := is.CreateJob(context.Background(), "u", "sess-x")
+	jobID, _ := is.CreateJob(context.Background(), "u", "sess-x", nil)
 
 	w, _ := NewWorker(WorkerConfig{Client: c})
 	job := &ImportJob{ID: jobID, UserID: "u", SessionID: "sess-x"}
@@ -103,5 +103,38 @@ func TestWorker_ProcessJob_FailureMarksFailed(t *testing.T) {
 	}
 	if got.Error == "" {
 		t.Fatal("expected error message")
+	}
+}
+
+func TestWorker_PassesJobMetadataToSink(t *testing.T) {
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	mux.HandleFunc("/mediaItems", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"mediaItems":[{"id":"a","mediaFile":{"baseUrl":"%s/dl/a","mimeType":"image/jpeg","filename":"a.jpg"}}]}`, srv.URL)
+	})
+	mux.HandleFunc("/dl/", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("x")) })
+	mux.HandleFunc("/sessions/", func(http.ResponseWriter, *http.Request) {})
+
+	prev := photosPickerAPIBase
+	photosPickerAPIBase = srv.URL
+	defer func() { photosPickerAPIBase = prev }()
+
+	c, ts, is, sk := newTestClient(t)
+	ts.records["u"] = TokenRecord{UserID: "u", AccessToken: "a", ExpiresAt: time.Now().Add(time.Hour)}
+	if _, err := is.CreateJob(context.Background(), "u", "sess-1", map[string]string{"item_id": "it-42"}); err != nil {
+		t.Fatalf("CreateJob: %v", err)
+	}
+
+	w, _ := NewWorker(WorkerConfig{Client: c})
+	w.DrainOnce(context.Background())
+
+	sk.mu.Lock()
+	defer sk.mu.Unlock()
+	if len(sk.saved) != 1 {
+		t.Fatalf("sink saved %d, want 1", len(sk.saved))
+	}
+	if got := sk.saved[0].JobMetadata["item_id"]; got != "it-42" {
+		t.Fatalf("JobMetadata[item_id] = %q, want it-42", got)
 	}
 }

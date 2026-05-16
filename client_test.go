@@ -87,12 +87,12 @@ func newFakeImportStore() *fakeImportStore {
 	return &fakeImportStore{jobs: make(map[string]*ImportJob)}
 }
 
-func (f *fakeImportStore) CreateJob(_ context.Context, userID, sessionID string) (string, error) {
+func (f *fakeImportStore) CreateJob(_ context.Context, userID, sessionID string, meta map[string]string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.next++
 	id := fmt.Sprintf("job-%d", f.next)
-	f.jobs[id] = &ImportJob{ID: id, UserID: userID, SessionID: sessionID, Status: ImportStatusPending, ImageURLs: []string{}}
+	f.jobs[id] = &ImportJob{ID: id, UserID: userID, SessionID: sessionID, Status: ImportStatusPending, SavedIDs: []string{}, Metadata: meta}
 	return id, nil
 }
 func (f *fakeImportStore) ClaimNextPending(_ context.Context) (*ImportJob, error) {
@@ -120,7 +120,7 @@ func (f *fakeImportStore) RecordItemSuccess(_ context.Context, id, saved string)
 	defer f.mu.Unlock()
 	j := f.jobs[id]
 	j.CompletedItems++
-	j.ImageURLs = append(j.ImageURLs, saved)
+	j.SavedIDs = append(j.SavedIDs, saved)
 	return nil
 }
 func (f *fakeImportStore) RecordItemFailure(_ context.Context, id string) error {
@@ -411,7 +411,7 @@ func TestCreatePickerSession_NotConnected(t *testing.T) {
 
 func TestStartGetImport(t *testing.T) {
 	c, _, is, _ := newTestClient(t)
-	id, err := c.StartImport(context.Background(), "u", "sess")
+	id, err := c.StartImport(context.Background(), "u", "sess", nil)
 	if err != nil {
 		t.Fatalf("start: %v", err)
 	}
@@ -426,4 +426,54 @@ func TestStartGetImport(t *testing.T) {
 		t.Fatal("expected ErrJobNotFound for wrong user")
 	}
 	_ = is
+}
+
+func TestPollPickerSession_Phases(t *testing.T) {
+	var body string
+	withFakeGoogle(t, func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintln(w, body)
+	})
+	c, ts, _, _ := newTestClient(t)
+	now := time.Unix(1_700_000_000, 0)
+	c.now = func() time.Time { return now }
+	ts.records["u"] = TokenRecord{UserID: "u", AccessToken: "a", ExpiresAt: now.Add(time.Hour)}
+
+	past := now.Add(-time.Minute).UTC().Format(time.RFC3339)
+	future := now.Add(time.Hour).UTC().Format(time.RFC3339)
+	cases := []struct {
+		name string
+		resp string
+		want SessionPhase
+	}{
+		{"pending", `{"id":"s"}`, SessionPending},
+		{"ready", `{"id":"s","mediaItemsSet":true}`, SessionReady},
+		{"future expiry stays pending", `{"id":"s","expireTime":"` + future + `"}`, SessionPending},
+		{"past expiry is expired", `{"id":"s","expireTime":"` + past + `"}`, SessionExpired},
+		{"picked beats expiry", `{"id":"s","mediaItemsSet":true,"expireTime":"` + past + `"}`, SessionReady},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body = tc.resp
+			st, err := c.PollPickerSession(context.Background(), "u", "s")
+			if err != nil {
+				t.Fatalf("poll: %v", err)
+			}
+			if st.Phase != tc.want {
+				t.Fatalf("phase = %q, want %q", st.Phase, tc.want)
+			}
+		})
+	}
+}
+
+func TestStartImport_StoresMetadata(t *testing.T) {
+	c, _, is, _ := newTestClient(t)
+	id, err := c.StartImport(context.Background(), "u", "sess", map[string]string{"item_id": "it-7"})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	is.mu.Lock()
+	defer is.mu.Unlock()
+	if got := is.jobs[id].Metadata["item_id"]; got != "it-7" {
+		t.Fatalf("Metadata[item_id] = %q, want it-7", got)
+	}
 }
